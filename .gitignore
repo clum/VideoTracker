@@ -251,4 +251,4 @@ Backup of *.doc*
 #----------------------------
 #Specific files in folders
 #----------------------------
-
+/Research/OpenCV/tracked_output/*

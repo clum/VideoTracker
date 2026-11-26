@@ -1,0 +1,7 @@
+name: video-tracking
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - opencv
+  - pyside6
