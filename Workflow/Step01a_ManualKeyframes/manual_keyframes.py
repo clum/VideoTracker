@@ -16,6 +16,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -341,7 +342,23 @@ class MainWindow(QMainWindow):
         self.frame_label = QLabel()
         self.play_button = QPushButton("Play")
         side_layout.addWidget(self.frame_label)
-        side_layout.addWidget(self.play_button)
+        playback_controls = QHBoxLayout()
+        playback_controls.addWidget(self.play_button)
+        playback_controls.addWidget(QLabel("Playback speed"))
+        self.speed_combo = QComboBox()
+        for label, multiplier in (
+            ("0.25×", 0.25),
+            ("0.5×", 0.5),
+            ("0.75×", 0.75),
+            ("1×", 1.0),
+            ("1.5×", 1.5),
+            ("2×", 2.0),
+        ):
+            self.speed_combo.addItem(label, multiplier)
+        self.speed_combo.setCurrentIndex(3)
+        self.speed_combo.setToolTip("Change playback speed without changing video frame timing or saved keyframes.")
+        playback_controls.addWidget(self.speed_combo)
+        side_layout.addLayout(playback_controls)
 
         self.keypoint_list = QListWidget()
         side_layout.addWidget(QLabel("Keypoints"))
@@ -382,6 +399,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.play_button.clicked.connect(self.toggle_playback)
+        self.speed_combo.currentIndexChanged.connect(self.update_playback_speed)
         self.frame_slider.sliderPressed.connect(self.pause_playback)
         self.frame_slider.valueChanged.connect(self.seek_to_frame)
         self.keypoint_list.currentItemChanged.connect(self.on_keypoint_selected)
@@ -390,6 +408,10 @@ class MainWindow(QMainWindow):
         self.canvas.boxDrawn.connect(self.add_box_keyframe)
         for name, control in self.roi_controls.items():
             control.valueChanged.connect(lambda _value, field=name: self.update_current_keyframe(field))
+
+    def update_playback_speed(self, _index: int = -1) -> None:
+        speed = float(self.speed_combo.currentData())
+        self.timer.setInterval(max(1, round(1000 / (self.video.fps * speed))))
 
     def update_frame_view(self) -> None:
         if self.current_frame is None:

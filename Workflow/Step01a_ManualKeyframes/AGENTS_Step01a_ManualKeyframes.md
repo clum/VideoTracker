@@ -19,7 +19,8 @@ Implement a desktop application that lets a user manually define ROI keyframes i
 
 ## GUI and ROI interaction
 
-- Display the current video frame with controls to play/pause and scrub to a frame. Show the current frame index and timestamp.
+- Display the current video frame with controls to play/pause, adjust playback speed, and scrub to a frame. Provide speed presets of 0.25×, 0.5×, 0.75×, 1×, 1.5×, and 2×, with 1× selected by default. Derive the timer interval from the source frame rate and selected multiplier; apply changes immediately during playback without starting playback when paused. Playback speed affects display cadence only: keep frame indices, source timestamps, keyframe data, and CSV output unchanged.
+- Show the current frame index and timestamp.
 - Provide a video canvas for ROI editing, numeric controls for `width`, `height`, `center_x`, and `center_y`, a running keypoint list, and a button to save the keypoints CSV.
 - Interpret all ROI parameters in source-video pixels. The coordinate origin is the frame's top-left corner; x increases to the right and y increases downward. `center_x` and `center_y` specify the ROI center. Map mouse coordinates through any display scaling or letterboxing back to source-frame pixels.
 - Let the user click and drag on the video to define a bounding box. Convert the box to width, height, and center coordinates and store it as a keypoint at the current frame.
@@ -38,7 +39,7 @@ Implement a desktop application that lets a user manually define ROI keyframes i
 
 ## Completion criteria
 
-- The user can launch with both paths on the command line, select either missing path through dialogs, scrub video, and play or pause it.
+- The user can launch with both paths on the command line, select either missing path through dialogs, scrub video, and play or pause it. All speed presets are available, default to 1×, and adjust playback cadence immediately while playing without changing frame indices, timestamps, keyframe data, or CSV output.
 - A first drag creates the initial keypoint. Later point clicks inherit dimensions from the preceding keypoint; later drags redefine both size and center. Re-editing a frame updates its existing entry.
 - The ROI overlay, numeric controls, and keypoint list stay consistent, including when selecting an item from the list or scrubbing between keypoints.
 - Saving creates the required folder and CSV schema at the settings-derived location, with frame-ordered keypoints and timestamps.
