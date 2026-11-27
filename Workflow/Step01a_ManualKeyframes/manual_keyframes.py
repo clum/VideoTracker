@@ -17,6 +17,8 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -106,6 +109,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--video", type=Path, help="video file to annotate")
     parser.add_argument("--settings", type=Path, help="settings JSON containing ResultsDirectory")
+    parser.add_argument("--keyframes", type=Path, help="optional CSV of keyframes to import at startup")
     return parser.parse_args(argv)
 
 
@@ -167,6 +171,66 @@ def write_keyframes_csv(
                     "center_y": f"{keyframe.center_y:.6f}".rstrip("0").rstrip("."),
                 }
             )
+
+
+def read_keyframes_csv(
+    input_path: Path,
+    frame_count: int,
+    frame_width: int,
+    frame_height: int,
+) -> dict[int, RoiKeyframe]:
+    """Read and validate a complete Step01a keyframe CSV before returning it."""
+    try:
+        with input_path.open("r", newline="", encoding="utf-8-sig") as csv_file:
+            reader = csv.DictReader(csv_file)
+            fields = reader.fieldnames
+            if fields is None or len(fields) != len(set(fields)) or set(fields) != set(CSV_FIELDS):
+                expected = ",".join(CSV_FIELDS)
+                raise WorkflowError(f"Keyframe CSV must contain these columns: {expected}")
+
+            keyframes: dict[int, RoiKeyframe] = {}
+            for line_number, row in enumerate(reader, start=2):
+                if None in row or any(row.get(field) is None or not row[field].strip() for field in CSV_FIELDS):
+                    raise WorkflowError(f"Keyframe CSV row {line_number} is incomplete or has extra values.")
+                try:
+                    frame_index = int(row["frame_index"])
+                    timestamp = float(row["timestamp_seconds"])
+                    values = {
+                        field: float(row[field])
+                        for field in ("width", "height", "center_x", "center_y")
+                    }
+                except ValueError as exc:
+                    raise WorkflowError(f"Keyframe CSV row {line_number} contains an invalid number.") from exc
+                if not math.isfinite(timestamp) or any(not math.isfinite(value) for value in values.values()):
+                    raise WorkflowError(f"Keyframe CSV row {line_number} contains a non-finite number.")
+                if not 0 <= frame_index < frame_count:
+                    raise WorkflowError(
+                        f"Keyframe CSV row {line_number} has frame_index {frame_index}, "
+                        f"outside this video's range 0–{frame_count - 1}."
+                    )
+                if frame_index in keyframes:
+                    raise WorkflowError(f"Keyframe CSV contains duplicate frame_index {frame_index}.")
+
+                keyframe = RoiKeyframe(**values)
+                error = validate_roi(keyframe, frame_width, frame_height)
+                if error:
+                    raise WorkflowError(f"Keyframe CSV row {line_number}: {error}")
+                keyframes[frame_index] = keyframe
+            return keyframes
+    except (OSError, csv.Error, UnicodeError) as exc:
+        raise WorkflowError(f"Could not read keyframe CSV {input_path}: {exc}") from exc
+
+
+def validate_roi(keyframe: RoiKeyframe, frame_width: int, frame_height: int) -> str | None:
+    if keyframe.width <= 0 or keyframe.height <= 0:
+        return "ROI width and height must be greater than zero."
+    left = keyframe.center_x - keyframe.width / 2
+    right = keyframe.center_x + keyframe.width / 2
+    top = keyframe.center_y - keyframe.height / 2
+    bottom = keyframe.center_y + keyframe.height / 2
+    if left < 0 or top < 0 or right > frame_width or bottom > frame_height:
+        return "The whole ROI must fit inside the video frame."
+    return None
 
 
 class VideoCanvas(QWidget):
@@ -310,6 +374,7 @@ class MainWindow(QMainWindow):
         settings_path: Path,
         results_directory: Path,
         video: VideoReader,
+        initial_keyframes: dict[int, RoiKeyframe] | None = None,
     ) -> None:
         super().__init__()
         self.video_path = video_path
@@ -318,8 +383,10 @@ class MainWindow(QMainWindow):
         self.video = video
         self.current_frame_index = 0
         self.current_frame = video.first_frame.copy()
-        self.keyframes: dict[int, RoiKeyframe] = {}
+        self.keyframes: dict[int, RoiKeyframe] = dict(initial_keyframes or {})
+        self._startup_import_requested = initial_keyframes is not None
         self._updating_controls = False
+        self._timeline_zoom = 1.0
         self.timer = QTimer(self)
         self.timer.setInterval(max(1, round(1000 / video.fps)))
         self.timer.timeout.connect(self.advance_frame)
@@ -328,7 +395,15 @@ class MainWindow(QMainWindow):
         self.resize(1200, 760)
         self._build_ui()
         self._connect_signals()
-        self.update_frame_view()
+        if self._startup_import_requested:
+            self._refresh_keypoint_list()
+            if self.keyframes:
+                self.seek_to_frame(min(self.keyframes))
+            else:
+                self.update_frame_view()
+            self.statusBar().showMessage(f"Imported {len(self.keyframes)} keyframes.", 5000)
+        else:
+            self.update_frame_view()
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -347,15 +422,20 @@ class MainWindow(QMainWindow):
         playback_controls.addWidget(QLabel("Playback speed"))
         self.speed_combo = QComboBox()
         for label, multiplier in (
+            ("0.05×", 0.05),
+            ("0.1×", 0.1),
             ("0.25×", 0.25),
             ("0.5×", 0.5),
             ("0.75×", 0.75),
             ("1×", 1.0),
             ("1.5×", 1.5),
             ("2×", 2.0),
+            ("5×", 5.0),
+            ("10×", 10.0),
+            ("20×", 20.0),
         ):
             self.speed_combo.addItem(label, multiplier)
-        self.speed_combo.setCurrentIndex(3)
+        self.speed_combo.setCurrentIndex(5)
         self.speed_combo.setToolTip("Change playback speed without changing video frame timing or saved keyframes.")
         playback_controls.addWidget(self.speed_combo)
         side_layout.addLayout(playback_controls)
@@ -363,6 +443,16 @@ class MainWindow(QMainWindow):
         self.keypoint_list = QListWidget()
         side_layout.addWidget(QLabel("Keypoints"))
         side_layout.addWidget(self.keypoint_list, 1)
+        self.import_button = QPushButton("Import Keyframes CSV")
+        side_layout.addWidget(self.import_button)
+        keypoint_actions = QHBoxLayout()
+        self.modify_keypoint_button = QPushButton("Modify Selected")
+        self.modify_keypoint_button.setEnabled(False)
+        self.delete_keypoint_button = QPushButton("Delete Selected")
+        self.delete_keypoint_button.setEnabled(False)
+        keypoint_actions.addWidget(self.modify_keypoint_button)
+        keypoint_actions.addWidget(self.delete_keypoint_button)
+        side_layout.addLayout(keypoint_actions)
 
         self.roi_controls: dict[str, QDoubleSpinBox] = {}
         form = QFormLayout()
@@ -394,6 +484,31 @@ class MainWindow(QMainWindow):
         timeline.addWidget(self.timeline_label)
         timeline.addWidget(self.frame_slider, 1)
         outer.addLayout(timeline)
+
+        timeline_tools = QHBoxLayout()
+        timeline_tools.addWidget(QLabel("Go to frame"))
+        self.frame_jump_spin = QSpinBox()
+        self.frame_jump_spin.setRange(0, self.video.frame_count - 1)
+        self.frame_jump_spin.setValue(0)
+        self.frame_jump_spin.setKeyboardTracking(False)
+        self.frame_jump_spin.setToolTip("Enter a zero-based frame number and press Enter to seek.")
+        timeline_tools.addWidget(self.frame_jump_spin)
+        timeline_tools.addWidget(QLabel("Timeline zoom"))
+        self.timeline_zoom_combo = QComboBox()
+        for label, zoom in (
+            ("Fit", 1.0),
+            ("2×", 2.0),
+            ("5×", 5.0),
+            ("10×", 10.0),
+            ("25×", 25.0),
+            ("50×", 50.0),
+            ("100×", 100.0),
+        ):
+            self.timeline_zoom_combo.addItem(label, zoom)
+        self.timeline_zoom_combo.setToolTip("Zoom the timeline around the current frame.")
+        timeline_tools.addWidget(self.timeline_zoom_combo)
+        timeline_tools.addStretch(1)
+        outer.addLayout(timeline_tools)
         self.setCentralWidget(root)
         self.statusBar().showMessage("Drag a box to create the first keypoint.")
 
@@ -402,7 +517,12 @@ class MainWindow(QMainWindow):
         self.speed_combo.currentIndexChanged.connect(self.update_playback_speed)
         self.frame_slider.sliderPressed.connect(self.pause_playback)
         self.frame_slider.valueChanged.connect(self.seek_to_frame)
+        self.frame_jump_spin.valueChanged.connect(self.seek_to_frame)
+        self.timeline_zoom_combo.currentIndexChanged.connect(self.update_timeline_zoom)
         self.keypoint_list.currentItemChanged.connect(self.on_keypoint_selected)
+        self.import_button.clicked.connect(self.import_keyframes_from_dialog)
+        self.modify_keypoint_button.clicked.connect(self.modify_selected_keypoint)
+        self.delete_keypoint_button.clicked.connect(self.delete_selected_keypoint)
         self.save_button.clicked.connect(self.save_keyframes)
         self.canvas.pointClicked.connect(self.add_point_keyframe)
         self.canvas.boxDrawn.connect(self.add_box_keyframe)
@@ -413,6 +533,28 @@ class MainWindow(QMainWindow):
         speed = float(self.speed_combo.currentData())
         self.timer.setInterval(max(1, round(1000 / (self.video.fps * speed))))
 
+    def update_timeline_zoom(self, _index: int = -1) -> None:
+        self._timeline_zoom = float(self.timeline_zoom_combo.currentData())
+        self._set_timeline_window(self.current_frame_index)
+
+    def _set_timeline_window(self, center_frame: int) -> None:
+        last_frame = self.video.frame_count - 1
+        if self._timeline_zoom <= 1.0:
+            start, end = 0, last_frame
+        else:
+            visible_frames = max(2, math.ceil(self.video.frame_count / self._timeline_zoom))
+            visible_frames = min(visible_frames, self.video.frame_count)
+            start = max(0, min(center_frame - visible_frames // 2, self.video.frame_count - visible_frames))
+            end = start + visible_frames - 1
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setRange(start, end)
+        self.frame_slider.setValue(center_frame)
+        self.frame_slider.blockSignals(False)
+
+    def _ensure_timeline_contains(self, frame_index: int) -> None:
+        if not self.frame_slider.minimum() <= frame_index <= self.frame_slider.maximum():
+            self._set_timeline_window(frame_index)
+
     def update_frame_view(self) -> None:
         if self.current_frame is None:
             return
@@ -421,6 +563,9 @@ class MainWindow(QMainWindow):
         timestamp = self.current_frame_index / self.video.fps
         self.frame_label.setText(f"Frame {self.current_frame_index}  |  {timestamp:.3f} s")
         self.timeline_label.setText(f"Frame {self.current_frame_index}")
+        self.frame_jump_spin.blockSignals(True)
+        self.frame_jump_spin.setValue(self.current_frame_index)
+        self.frame_jump_spin.blockSignals(False)
         self._sync_controls(keyframe)
         self._sync_keypoint_selection()
 
@@ -445,6 +590,9 @@ class MainWindow(QMainWindow):
         self.keypoint_list.blockSignals(True)
         self.keypoint_list.setCurrentItem(target_item)
         self.keypoint_list.blockSignals(False)
+        has_selection = target_item is not None
+        self.modify_keypoint_button.setEnabled(has_selection)
+        self.delete_keypoint_button.setEnabled(has_selection)
 
     def seek_to_frame(self, frame_index: int) -> None:
         if frame_index == self.current_frame_index and self.current_frame is not None:
@@ -460,6 +608,7 @@ class MainWindow(QMainWindow):
             return
         self.current_frame_index = frame_index
         self.current_frame = frame
+        self._ensure_timeline_contains(frame_index)
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(frame_index)
         self.frame_slider.blockSignals(False)
@@ -477,6 +626,7 @@ class MainWindow(QMainWindow):
             return
         self.current_frame_index = next_frame
         self.current_frame = frame
+        self._ensure_timeline_contains(next_frame)
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(next_frame)
         self.frame_slider.blockSignals(False)
@@ -507,16 +657,76 @@ class MainWindow(QMainWindow):
         frame_index = int(current.data(Qt.ItemDataRole.UserRole))
         self.frame_slider.setValue(frame_index)
 
+    def modify_selected_keypoint(self) -> None:
+        item = self.keypoint_list.currentItem()
+        if item is None:
+            return
+        frame_index = int(item.data(Qt.ItemDataRole.UserRole))
+        keyframe = self.keyframes.get(frame_index)
+        if keyframe is None:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Modify keypoint at frame {frame_index}")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        controls: dict[str, QDoubleSpinBox] = {}
+        for field, label in (
+            ("width", "Width (px)"),
+            ("height", "Height (px)"),
+            ("center_x", "Center X (px)"),
+            ("center_y", "Center Y (px)"),
+        ):
+            control = QDoubleSpinBox(dialog)
+            control.setDecimals(2)
+            control.setSingleStep(1.0)
+            control.setRange(0.0, 1_000_000.0)
+            control.setValue(getattr(keyframe, field))
+            controls[field] = control
+            form.addRow(label, control)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        candidate = RoiKeyframe(**{field: control.value() for field, control in controls.items()})
+        error = self._validate_keyframe(candidate)
+        if error:
+            QMessageBox.warning(self, "Invalid ROI", error)
+            return
+        self.keyframes[frame_index] = candidate
+        self.seek_to_frame(frame_index)
+        self._refresh_keypoint_list()
+        self.update_frame_view()
+        self.statusBar().showMessage(f"Keypoint at frame {frame_index} modified.", 3000)
+
+    def delete_selected_keypoint(self) -> None:
+        item = self.keypoint_list.currentItem()
+        if item is None:
+            return
+        frame_index = int(item.data(Qt.ItemDataRole.UserRole))
+        answer = QMessageBox.question(
+            self,
+            "Delete keypoint",
+            f"Delete the keypoint at frame {frame_index}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        del self.keyframes[frame_index]
+        self._refresh_keypoint_list()
+        self.update_frame_view()
+        self.statusBar().showMessage(f"Keypoint at frame {frame_index} deleted.", 3000)
+
     def _validate_keyframe(self, keyframe: RoiKeyframe) -> str | None:
-        if keyframe.width <= 0 or keyframe.height <= 0:
-            return "ROI width and height must be greater than zero."
-        left = keyframe.center_x - keyframe.width / 2
-        right = keyframe.center_x + keyframe.width / 2
-        top = keyframe.center_y - keyframe.height / 2
-        bottom = keyframe.center_y + keyframe.height / 2
-        if left < 0 or top < 0 or right > self.video.frame_width or bottom > self.video.frame_height:
-            return "The whole ROI must fit inside the video frame."
-        return None
+        return validate_roi(keyframe, self.video.frame_width, self.video.frame_height)
 
     def _store_keyframe(self, frame_index: int, keyframe: RoiKeyframe) -> bool:
         error = self._validate_keyframe(keyframe)
@@ -601,6 +811,37 @@ class MainWindow(QMainWindow):
         self.keypoint_list.blockSignals(False)
         self._sync_keypoint_selection()
 
+    def import_keyframes_from_dialog(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import keyframes CSV",
+            "",
+            "CSV files (*.csv);;All files (*.*)",
+        )
+        if not selected:
+            return
+        input_path = Path(selected).expanduser().resolve()
+        try:
+            imported = read_keyframes_csv(
+                input_path,
+                self.video.frame_count,
+                self.video.frame_width,
+                self.video.frame_height,
+            )
+        except WorkflowError as exc:
+            QMessageBox.warning(self, "Could not import keyframes", str(exc))
+            return
+        self._replace_keyframes(imported)
+        self.statusBar().showMessage(f"Imported {len(imported)} keyframes from {input_path.name}.", 5000)
+
+    def _replace_keyframes(self, keyframes: dict[int, RoiKeyframe]) -> None:
+        self.keyframes = dict(keyframes)
+        self._refresh_keypoint_list()
+        if self.keyframes:
+            self.seek_to_frame(min(self.keyframes))
+        else:
+            self.update_frame_view()
+
     def save_keyframes(self) -> None:
         output_directory = self.results_directory / "Step01a_ManualKeyframes"
         output_path = output_directory / f"{self.video_path.stem}_manual_keyframes.csv"
@@ -639,11 +880,28 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         results_directory = resolve_results_directory(settings_path)
         video = VideoReader(video_path)
+        initial_keyframes: dict[int, RoiKeyframe] | None = None
+        if args.keyframes is not None:
+            keyframes_path = get_startup_path(
+                args.keyframes,
+                "Select keyframes CSV",
+                "CSV files (*.csv);;All files (*.*)",
+            )
+            if keyframes_path is None:
+                return 0
+            initial_keyframes = read_keyframes_csv(
+                keyframes_path,
+                video.frame_count,
+                video.frame_width,
+                video.frame_height,
+            )
     except (WorkflowError, OSError, cv2.error) as exc:
+        if "video" in locals():
+            video.close()
         QMessageBox.critical(None, "Step01a could not start", str(exc))
         return 1
 
-    window = MainWindow(video_path, settings_path, results_directory, video)
+    window = MainWindow(video_path, settings_path, results_directory, video, initial_keyframes)
     window.show()
     return app.exec()
 
