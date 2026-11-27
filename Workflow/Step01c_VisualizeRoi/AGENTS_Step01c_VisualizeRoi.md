@@ -21,6 +21,7 @@ Implement a tool that reads the per-frame ROI data from Step01b, draws the ROI o
 
 - Match each CSV row to the video frame with the same zero-based `frame_index`; draw a green, 2-pixel rectangle centered at `(center_x, center_y)` with the row's `width` and `height`.
 - Render exactly one output frame per input frame, preserving frame order, source dimensions, and FPS. Do not resize, interpolate, skip, or add frames.
+- Display a terminal progress meter during rendering with completed frames, total frames, and percentage. Update at percentage changes rather than printing for every frame; print percentage updates on separate lines when stdout is redirected. Print a clear status message while FFmpeg muxes audio.
 - Write the annotated video to a temporary silent MP4 in the Step01c output folder, then use FFmpeg to mux the original audio stream into `<ResultsDirectory>/Step01c_VisualizeRoi/<ScenarioName>_visualize_roi.mp4`.
 - If the source has no audio stream, keep the annotated video silent. If it has audio, require the final output to contain that audio; fail clearly if FFmpeg or muxing fails instead of silently dropping the audio. Clean up temporary files after success and on handled errors.
 - Create the output folder if needed. Do not modify the source video, input CSV, or settings JSON. Report the final output path on success.
@@ -29,6 +30,7 @@ Implement a tool that reads the per-frame ROI data from Step01b, draws the ROI o
 
 - Users can provide all three paths by command line or choose any omitted input through file dialogs.
 - Every output frame has the ROI from its corresponding CSV row and matches source frame count, frame order, dimensions, and FPS.
+- The terminal shows rendering progress through completion and identifies the audio-mux phase when the source has audio.
 - The output filename is `<ScenarioName>_visualize_roi.mp4` under `<ResultsDirectory>/Step01c_VisualizeRoi/`.
 - Source audio is present in the output when the input has audio; an input without audio produces a silent annotated MP4.
 - Invalid settings, video, frame metadata, CSV schema or rows, out-of-bounds ROI data, output write failures, and FFmpeg errors produce understandable feedback without changing inputs.

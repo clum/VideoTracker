@@ -48,6 +48,42 @@ class Roi:
     center_y: float
 
 
+class TerminalProgress:
+    """Show percentage changes as a bar or as readable lines when redirected."""
+
+    def __init__(self, label: str, total: int) -> None:
+        self.label = label
+        self.total = total
+        self.is_tty = sys.stdout.isatty()
+        self.last_percent = -1
+        self.finished = False
+        print(f"{label}...", flush=True)
+
+    def update(self, completed: int) -> None:
+        percent = min(100, int(completed * 100 / self.total))
+        if percent == self.last_percent and completed != self.total:
+            return
+        self.last_percent = percent
+        if self.is_tty:
+            width = 30
+            filled = round(width * percent / 100)
+            bar = "#" * filled + "-" * (width - filled)
+            print(
+                f"\r{self.label}: [{bar}] {percent:3d}% ({completed}/{self.total})",
+                end="",
+                flush=True,
+            )
+            if completed == self.total:
+                print(flush=True)
+        else:
+            print(f"{self.label}: {percent}% ({completed}/{self.total})", flush=True)
+        self.finished = completed == self.total
+
+    def finish(self) -> None:
+        if self.is_tty and not self.finished:
+            print(flush=True)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Draw the Step01b ROI on every frame of the source video."
@@ -279,6 +315,7 @@ def render_silent_video(
 ) -> None:
     capture = cv2.VideoCapture(str(video_path))
     writer = None
+    progress: TerminalProgress | None = None
     try:
         if not capture.isOpened():
             raise WorkflowError(f"OpenCV could not reopen the source video: {video_path}")
@@ -288,6 +325,7 @@ def render_silent_video(
         )
         if not writer.isOpened():
             raise WorkflowError(f"Could not create the temporary annotated video: {output_path}")
+        progress = TerminalProgress("Rendering ROI overlay", len(rois))
 
         for frame_index, roi in enumerate(rois):
             ok, frame = capture.read()
@@ -299,12 +337,15 @@ def render_silent_video(
                 raise WorkflowError(f"Source frame {frame_index} has inconsistent dimensions.")
             draw_roi(frame, roi)
             writer.write(frame)
+            progress.update(frame_index + 1)
     except cv2.error as exc:
         raise WorkflowError(f"OpenCV failed while rendering the ROI overlay: {exc}") from exc
     finally:
         capture.release()
         if writer is not None:
             writer.release()
+        if progress is not None:
+            progress.finish()
 
 
 def mux_audio(
@@ -314,6 +355,7 @@ def mux_audio(
     muxed_output: Path,
     video: VideoInfo,
 ) -> None:
+    print("Muxing source audio with FFmpeg...", flush=True)
     duration_seconds = video.frame_count / video.fps
     command = [
         ffmpeg,
@@ -383,6 +425,7 @@ def render_video(
             os.replace(mux_temp, output_path)
             mux_temp = None
         else:
+            print("Source video has no audio; keeping the annotated video silent.", flush=True)
             os.replace(silent_temp, output_path)
     finally:
         silent_temp.unlink(missing_ok=True)

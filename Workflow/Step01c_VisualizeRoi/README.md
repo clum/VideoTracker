@@ -31,3 +31,5 @@ Any omitted option opens a file dialog. The settings JSON must contain non-empty
 The tool writes `<ScenarioName>_visualize_roi.mp4` under `<ResultsDirectory>\Step01c_VisualizeRoi`. The Step01b CSV must contain exactly one valid ROI row for each source-video frame, using columns `frame_index,timestamp_seconds,width,height,center_x,center_y`.
 
 The ROI is a green 2-pixel rectangle in source-video pixel coordinates. Videos with audio keep their source audio via FFmpeg; videos without audio produce a silent annotated video. Inputs are not modified.
+
+During rendering, the terminal reports completed frames, total frames, and percentage. It updates a single progress line in an interactive terminal, or prints percentage updates on separate lines when output is redirected. Audio-bearing videos also show a message while FFmpeg muxes the source audio.
