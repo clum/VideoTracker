@@ -53,6 +53,7 @@ TRACKER_CLASSES = {
     "nano": ("TrackerNano",),
     "vit": ("TrackerVit",),
 }
+PROGRESS_BAR_WIDTH = 30
 
 
 class WorkflowError(Exception):
@@ -119,6 +120,22 @@ class VideoReader:
         self.capture.release()
 
 
+def write_progress(completed_frames: int, total_frames: int, *, final: bool = False) -> None:
+    """Update a single-line terminal progress bar for frame processing."""
+    fraction = completed_frames / total_frames
+    filled = min(PROGRESS_BAR_WIDTH, int(PROGRESS_BAR_WIDTH * fraction))
+    bar = "=" * filled + (">" if filled < PROGRESS_BAR_WIDTH else "")
+    bar = bar.ljust(PROGRESS_BAR_WIDTH)
+    percentage = int(fraction * 100)
+    sys.stderr.write(
+        f"\rTracking [{bar}] {percentage:3d}% "
+        f"({completed_frames}/{total_frames} frames)"
+    )
+    if final:
+        sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Select one object in a video and track it with OpenCV."
@@ -126,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settings", type=Path, help="settings JSON containing ResultsDirectory and ScenarioName")
     parser.add_argument("--video", type=Path, help="source video to track")
     parser.add_argument("--algorithm", choices=ALGORITHMS, required=True, help="OpenCV tracker algorithm")
+    parser.add_argument("--roi-csv", type=Path, help="optional one-row Step02a ROI CSV; skips interactive ROI selection")
     parser.add_argument("--siam-rpn-model", type=Path, help="DaSiamRPN model file")
     parser.add_argument("--kernel-cls1-model", type=Path, help="DaSiamRPN classification kernel model file")
     parser.add_argument("--kernel-r1-model", type=Path, help="DaSiamRPN regression kernel model file")
@@ -259,6 +277,46 @@ def validate_roi(
         raise WorkflowError("The selected ROI has invalid coordinates or dimensions.")
     if x + roi_width > width or y + roi_height > height:
         raise WorkflowError("The selected ROI extends outside the first video frame.")
+
+
+def load_roi_csv(
+    csv_path: Path,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int]:
+    """Load the single pixel-aligned ROI produced by this workflow."""
+    try:
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as csv_file:
+            reader = csv.DictReader(csv_file)
+            if reader.fieldnames != list(ROI_CSV_FIELDS):
+                raise WorkflowError(
+                    "ROI CSV must have these columns in order: " + ",".join(ROI_CSV_FIELDS)
+                )
+            rows = list(reader)
+    except (OSError, csv.Error, UnicodeError) as exc:
+        raise WorkflowError(f"Could not read ROI CSV {csv_path}: {exc}") from exc
+
+    if len(rows) != 1:
+        raise WorkflowError(f"ROI CSV must contain exactly one data row; found {len(rows)}.")
+    row = rows[0]
+    if None in row or any(row.get(field) is None or not row[field].strip() for field in ROI_CSV_FIELDS):
+        raise WorkflowError("ROI CSV data row is incomplete or contains extra values.")
+
+    values: dict[str, float] = {}
+    for field in ROI_CSV_FIELDS:
+        try:
+            values[field] = float(row[field])
+        except ValueError as exc:
+            raise WorkflowError(f"ROI CSV field '{field}' must be numeric.") from exc
+        if not math.isfinite(values[field]):
+            raise WorkflowError(f"ROI CSV field '{field}' must be finite.")
+
+    box_fields = ("x", "y", "width", "height")
+    if any(not values[field].is_integer() for field in box_fields):
+        raise WorkflowError("ROI CSV x, y, width, and height values must be whole pixels.")
+    box = tuple(int(values[field]) for field in box_fields)
+    validate_roi(box, frame_width, frame_height)
+    return box
 
 
 def _tracker_factory(algorithm: str) -> Any:
@@ -396,6 +454,7 @@ def run(
     video_path: Path,
     algorithm: str,
     model_paths: dict[str, Path] | None = None,
+    roi_csv_path: Path | None = None,
 ) -> Outputs:
     results_directory, scenario_name = load_settings(settings_path)
     reader = VideoReader(video_path)
@@ -405,9 +464,17 @@ def run(
     if output_resolved.intersection(path.resolve() for path in input_paths):
         reader.close()
         raise WorkflowError("An output path would overwrite an input file.")
+    if roi_csv_path is not None:
+        roi_input_resolved = roi_csv_path.resolve()
+        if roi_input_resolved in {outputs.roi_image.resolve(), outputs.tracked_csv.resolve()}:
+            reader.close()
+            raise WorkflowError("The ROI CSV input path conflicts with a different Step02a output.")
 
     try:
-        roi = select_roi(reader.first_frame)
+        if roi_csv_path is None:
+            roi = select_roi(reader.first_frame)
+        else:
+            roi = load_roi_csv(roi_csv_path, reader.info.width, reader.info.height)
         validate_roi(roi, reader.info.width, reader.info.height)
         tracker = create_tracker(algorithm, model_paths or {})
         try:
@@ -437,24 +504,38 @@ def run(
                     writer = csv.DictWriter(csv_file, fieldnames=TRACK_CSV_FIELDS)
                     writer.writeheader()
                     _write_track_row(writer, 0, reader.info.fps, tuple(float(v) for v in roi))
-                    for frame_index in range(1, reader.info.frame_count):
-                        frame = reader.read_next()
-                        if frame is None:
-                            raise WorkflowError(
-                                f"Source video ended or failed while reading frame {frame_index}."
-                            )
-                        if frame.shape[1] != reader.info.width or frame.shape[0] != reader.info.height:
-                            raise WorkflowError(
-                                f"Source frame {frame_index} has inconsistent dimensions."
-                            )
-                        try:
-                            tracking_ok, updated = tracker.update(frame)
-                        except (cv2.error, TypeError, ValueError) as exc:
-                            raise WorkflowError(
-                                f"The {algorithm} tracker failed on frame {frame_index}: {exc}"
-                            ) from exc
-                        box = _box_from_tracker(updated) if tracking_ok else None
-                        _write_track_row(writer, frame_index, reader.info.fps, box)
+                    progress_finished = False
+                    try:
+                        if reader.info.frame_count == 1:
+                            write_progress(1, reader.info.frame_count, final=True)
+                            progress_finished = True
+                        else:
+                            write_progress(1, reader.info.frame_count)
+                        for frame_index in range(1, reader.info.frame_count):
+                            frame = reader.read_next()
+                            if frame is None:
+                                raise WorkflowError(
+                                    f"Source video ended or failed while reading frame {frame_index}."
+                                )
+                            if frame.shape[1] != reader.info.width or frame.shape[0] != reader.info.height:
+                                raise WorkflowError(
+                                    f"Source frame {frame_index} has inconsistent dimensions."
+                                )
+                            try:
+                                tracking_ok, updated = tracker.update(frame)
+                            except (cv2.error, TypeError, ValueError) as exc:
+                                raise WorkflowError(
+                                    f"The {algorithm} tracker failed on frame {frame_index}: {exc}"
+                                ) from exc
+                            box = _box_from_tracker(updated) if tracking_ok else None
+                            _write_track_row(writer, frame_index, reader.info.fps, box)
+                            final_frame = frame_index + 1 == reader.info.frame_count
+                            write_progress(frame_index + 1, reader.info.frame_count, final=final_frame)
+                            progress_finished = final_frame
+                    finally:
+                        if not progress_finished:
+                            sys.stderr.write("\n")
+                            sys.stderr.flush()
             except (OSError, csv.Error) as exc:
                 raise WorkflowError(f"Could not write tracking CSV: {exc}") from exc
 
@@ -494,7 +575,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         if video_path is None:
             return 0
-        outputs = run(settings_path, video_path, args.algorithm, model_paths)
+        roi_csv_path = None
+        if args.roi_csv is not None:
+            roi_csv_path = resolve_input_path(
+                args.roi_csv,
+                "Select saved ROI CSV",
+                "CSV files (*.csv);;All files (*.*)",
+            )
+            if roi_csv_path is None:
+                return 0
+        outputs = run(settings_path, video_path, args.algorithm, model_paths, roi_csv_path)
     except (WorkflowError, OSError, cv2.error) as exc:
         QMessageBox.critical(None, "Step02a could not complete", str(exc))
         print(f"Step02a failed: {exc}", file=sys.stderr)
@@ -503,11 +593,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"ROI image: {outputs.roi_image}")
     print(f"ROI coordinates: {outputs.roi_csv}")
     print(f"Tracking results: {outputs.tracked_csv}")
-    QMessageBox.information(
-        None,
-        "Tracking complete",
-        f"Saved outputs to:\n{outputs.roi_image.parent}",
-    )
+    if roi_csv_path is None:
+        QMessageBox.information(
+            None,
+            "Tracking complete",
+            f"Saved outputs to:\n{outputs.roi_image.parent}",
+        )
     return 0
 
 

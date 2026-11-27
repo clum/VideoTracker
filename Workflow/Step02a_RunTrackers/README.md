@@ -26,6 +26,18 @@ python .\Workflow\Step02a_RunTrackers\run_trackers.py `
 
 The `--settings` and `--video` options can be omitted; the app opens a file dialog for each omitted path. The settings JSON must contain non-empty `ResultsDirectory` and `ScenarioName` entries. A relative `ResultsDirectory` is resolved against the settings file's directory.
 
+To reuse an ROI CSV from a previous run and skip the OpenCV ROI selection window, pass `--roi-csv`:
+
+```powershell
+python .\Workflow\Step02a_RunTrackers\run_trackers.py `
+  --settings "D:\path\to\settings.json" `
+  --video "D:\path\to\source_video.mp4" `
+  --algorithm csrt `
+  --roi-csv "D:\path\to\Step02a_RunTrackers\scenario_csrt_roi.csv"
+```
+
+The CSV must contain exactly one row with the Step02a columns `x,y,width,height,center_x,center_y`. The box values must be whole pixels and fit within the first video frame. The box defines the ROI; center values are recalculated. When settings, video, algorithm, and ROI CSV are all provided, the run completes without an ROI or success dialog. If settings or video are omitted, their existing file dialogs still appear. The ROI CSV may be the same file that the run will regenerate as its ROI CSV output.
+
 For the model-based algorithms, pass their required model files. For example, DaSiamRPN requires all three:
 
 ```powershell
@@ -40,7 +52,7 @@ python .\Workflow\Step02a_RunTrackers\run_trackers.py `
 
 Nano requires `--nano-backbone` and `--nano-neckhead`; ViT requires `--vit-model`. Model files are not downloaded by this tool. Each selected DNN tracker requires its model files; model options for other algorithms are not needed.
 
-In the ROI window, drag a box around the object and press **Enter** or **Space** to accept it. Press **C** to cancel. The selector requires a desktop session and GUI-enabled OpenCV.
+Without `--roi-csv`, the ROI window opens. Drag a box around the object and press **Enter** or **Space** to accept it. Press **C** to cancel. The selector requires a desktop session and GUI-enabled OpenCV.
 
 ## Output
 
@@ -49,6 +61,8 @@ The tool writes to `<ResultsDirectory>\Step02a_RunTrackers`:
 - `<ScenarioName>_<algorithm>_roi.png`: unannotated crop of the selected region in the first frame.
 - `<ScenarioName>_<algorithm>_roi.csv`: one row with `x,y,width,height,center_x,center_y`.
 - `<ScenarioName>_<algorithm>_tracked.csv`: one row per video frame with `frame_index,timestamp_seconds,tracking_status,x,y,width,height,center_x,center_y`.
+
+While frames are processed, the terminal displays a progress bar with the completed and total frame counts and percentage.
 
 Coordinates are in source-video pixels from the top-left origin, with x increasing to the right and y increasing downward. Frame indices start at zero and timestamps are computed as `frame_index / fps`. The first frame is recorded as `tracked` with the selected ROI. If a tracker update fails, its row is marked `lost` with blank coordinate fields; processing continues for later frames.
 
