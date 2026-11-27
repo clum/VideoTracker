@@ -21,6 +21,8 @@ Implement a desktop application that lets a user manually define ROI keyframes i
 
 - Display the current video frame with controls to play/pause, adjust playback speed, and scrub to a frame. Provide speed presets of 0.05×, 0.1×, 0.25×, 0.5×, 0.75×, 1×, 1.5×, 2×, 5×, 10×, and 20×, with 1× selected by default. Derive the timer interval from the source frame rate and selected multiplier; apply changes immediately during playback without starting playback when paused. Playback speed affects display cadence only: keep frame indices, source timestamps, keyframe data, and CSV output unchanged.
 - Show the current frame index and timestamp.
+- Bind window-wide keyboard shortcuts: `P` activates Play/Pause; Left/Right seeks by 5 frames and pauses at the destination; `E`/`D` increases/decreases the current ROI height by 1 pixel; `F`/`S` decreases/increases its width by 1 pixel. Suspend shortcuts while a numeric or text field is being edited. ROI size shortcuts modify only an existing keyframe at the current frame, use normal ROI validation, and leave the keyframe unchanged if the adjustment is invalid or no keyframe exists.
+- Display these shortcuts in a compact **Keyboard shortcuts** text box in the GUI.
 - Provide a zero-based frame-number control that seeks directly to the specified frame, bounded by the video's first and last frames.
 - Provide a timeline zoom control with a fit-to-video view and zoomed views centered around the current frame. Keep the visible timeline window synchronized when seeking or playing beyond its current range; zoom must not change frame indices or timestamps.
 - Provide a video canvas for ROI editing, numeric controls for `width`, `height`, `center_x`, and `center_y`, a running keypoint list, and a button to save the keypoints CSV.
@@ -45,6 +47,7 @@ Implement a desktop application that lets a user manually define ROI keyframes i
 ## Completion criteria
 
 - The user can launch with both paths on the command line, select either missing path through dialogs, scrub video, jump to a zero-based frame number, zoom the timeline, and play or pause it. All speed presets are available, default to 1×, and adjust playback cadence immediately while playing without changing frame indices, timestamps, keyframe data, or CSV output.
+- The displayed keyboard shortcuts control playback, frame stepping, and current-frame ROI dimensions as specified; arrow seeks pause playback and clamp at the video boundaries.
 - A first drag creates the initial keypoint. Later point clicks inherit dimensions from the preceding keypoint; later drags redefine both size and center. Re-editing a frame updates its existing entry.
 - The ROI overlay, numeric controls, and keypoint list stay consistent, including when selecting an item from the list or scrubbing between keypoints.
 - A selected keypoint can be modified through its four ROI values or deleted from the list; invalid edits preserve the last valid keypoint, and deletion is confirmed before removal.

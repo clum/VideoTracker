@@ -13,7 +13,7 @@ from typing import Any
 
 import cv2
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -22,13 +22,16 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QAbstractSpinBox,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -387,6 +390,7 @@ class MainWindow(QMainWindow):
         self._startup_import_requested = initial_keyframes is not None
         self._updating_controls = False
         self._timeline_zoom = 1.0
+        self._shortcuts: list[QShortcut] = []
         self.timer = QTimer(self)
         self.timer.setInterval(max(1, round(1000 / video.fps)))
         self.timer.timeout.connect(self.advance_frame)
@@ -471,6 +475,18 @@ class MainWindow(QMainWindow):
             form.addRow(label, control)
         side_layout.addLayout(form)
 
+        shortcut_group = QGroupBox("Keyboard shortcuts")
+        shortcut_layout = QVBoxLayout(shortcut_group)
+        shortcut_text = QLabel(
+            "P — Play / pause\n"
+            "← / → — Back / forward 5 frames\n"
+            "E / D — Increase / decrease ROI height by 1 px\n"
+            "F / S — Increase / decrease ROI width by 1 px"
+        )
+        shortcut_text.setWordWrap(True)
+        shortcut_layout.addWidget(shortcut_text)
+        side_layout.addWidget(shortcut_group)
+
         self.save_button = QPushButton("Save Keyframes CSV")
         side_layout.addWidget(self.save_button)
         body.addWidget(side_panel, 0)
@@ -513,6 +529,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Drag a box to create the first keypoint.")
 
     def _connect_signals(self) -> None:
+        self._register_keyboard_shortcuts()
         self.play_button.clicked.connect(self.toggle_playback)
         self.speed_combo.currentIndexChanged.connect(self.update_playback_speed)
         self.frame_slider.sliderPressed.connect(self.pause_playback)
@@ -528,6 +545,61 @@ class MainWindow(QMainWindow):
         self.canvas.boxDrawn.connect(self.add_box_keyframe)
         for name, control in self.roi_controls.items():
             control.valueChanged.connect(lambda _value, field=name: self.update_current_keyframe(field))
+
+    def _register_keyboard_shortcuts(self) -> None:
+        bindings = (
+            ("P", "play_pause"),
+            (Qt.Key.Key_Left, "step_back"),
+            (Qt.Key.Key_Right, "step_forward"),
+            ("E", "height_up"),
+            ("D", "height_down"),
+            ("S", "width_down"),
+            ("F", "width_up"),
+        )
+        for key, action in bindings:
+            sequence = QKeySequence(key) if isinstance(key, str) else QKeySequence(key)
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(lambda name=action: self._dispatch_keyboard_shortcut(name))
+            self._shortcuts.append(shortcut)
+
+    def _dispatch_keyboard_shortcut(self, action: str) -> None:
+        focus_widget = QApplication.focusWidget()
+        if isinstance(focus_widget, (QAbstractSpinBox, QLineEdit)):
+            return
+        actions = {
+            "play_pause": self.play_button.click,
+            "step_back": lambda: self.step_frames(-5),
+            "step_forward": lambda: self.step_frames(5),
+            "height_up": lambda: self.adjust_current_roi("height", 1.0),
+            "height_down": lambda: self.adjust_current_roi("height", -1.0),
+            "width_down": lambda: self.adjust_current_roi("width", -1.0),
+            "width_up": lambda: self.adjust_current_roi("width", 1.0),
+        }
+        actions[action]()
+
+    def step_frames(self, offset: int) -> None:
+        self.pause_playback()
+        target_frame = max(0, min(self.current_frame_index + offset, self.video.frame_count - 1))
+        self.seek_to_frame(target_frame)
+
+    def adjust_current_roi(self, field: str, delta: float) -> None:
+        keyframe = self.keyframes.get(self.current_frame_index)
+        if keyframe is None:
+            self.statusBar().showMessage(
+                "There is no ROI keyframe at the current frame to resize.",
+                3000,
+            )
+            return
+        candidate_values = {
+            "width": keyframe.width,
+            "height": keyframe.height,
+            "center_x": keyframe.center_x,
+            "center_y": keyframe.center_y,
+        }
+        candidate_values[field] += delta
+        self._store_keyframe(self.current_frame_index, RoiKeyframe(**candidate_values))
 
     def update_playback_speed(self, _index: int = -1) -> None:
         speed = float(self.speed_combo.currentData())
