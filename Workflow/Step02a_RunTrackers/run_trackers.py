@@ -9,6 +9,7 @@ import math
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,7 @@ class Outputs:
     roi_image: Path
     roi_csv: Path
     tracked_csv: Path
+    time_txt: Path
 
 
 class VideoReader:
@@ -446,6 +448,7 @@ def output_paths(results_directory: Path, scenario_name: str, algorithm: str) ->
         output_directory / f"{stem}_roi.png",
         output_directory / f"{stem}_roi.csv",
         output_directory / f"{stem}_tracked.csv",
+        output_directory / f"{stem}_time.txt",
     )
 
 
@@ -460,13 +463,20 @@ def run(
     reader = VideoReader(video_path)
     outputs = output_paths(results_directory, scenario_name, algorithm)
     input_paths = (settings_path.resolve(), video_path.resolve(), *(model_paths or {}).values())
-    output_resolved = {path.resolve() for path in (outputs.roi_image, outputs.roi_csv, outputs.tracked_csv)}
+    output_resolved = {
+        path.resolve()
+        for path in (outputs.roi_image, outputs.roi_csv, outputs.tracked_csv, outputs.time_txt)
+    }
     if output_resolved.intersection(path.resolve() for path in input_paths):
         reader.close()
         raise WorkflowError("An output path would overwrite an input file.")
     if roi_csv_path is not None:
         roi_input_resolved = roi_csv_path.resolve()
-        if roi_input_resolved in {outputs.roi_image.resolve(), outputs.tracked_csv.resolve()}:
+        if roi_input_resolved in {
+            outputs.roi_image.resolve(),
+            outputs.tracked_csv.resolve(),
+            outputs.time_txt.resolve(),
+        }:
             reader.close()
             raise WorkflowError("The ROI CSV input path conflicts with a different Step02a output.")
 
@@ -476,6 +486,7 @@ def run(
         else:
             roi = load_roi_csv(roi_csv_path, reader.info.width, reader.info.height)
         validate_roi(roi, reader.info.width, reader.info.height)
+        tracking_started_at = time.perf_counter()
         tracker = create_tracker(algorithm, model_paths or {})
         try:
             initialized = tracker.init(reader.first_frame, roi)
@@ -492,6 +503,7 @@ def run(
             staged_roi_image = staging / "roi.png"
             staged_roi_csv = staging / "roi.csv"
             staged_tracked_csv = staging / "tracked.csv"
+            staged_time_txt = staging / "time.txt"
 
             x, y, width, height = roi
             crop = reader.first_frame[y : y + height, x : x + width]
@@ -539,10 +551,22 @@ def run(
             except (OSError, csv.Error) as exc:
                 raise WorkflowError(f"Could not write tracking CSV: {exc}") from exc
 
+            elapsed_seconds = time.perf_counter() - tracking_started_at
+            try:
+                staged_time_txt.write_text(
+                    f"Elapsed tracking time: {elapsed_seconds:.6f} seconds\n"
+                    "Measured from tracker setup through processing and writing per-frame tracking results. "
+                    "Interactive ROI selection and final output replacement are excluded.\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                raise WorkflowError(f"Could not write tracking time file: {exc}") from exc
+
             for staged, destination in (
                 (staged_roi_image, outputs.roi_image),
                 (staged_roi_csv, outputs.roi_csv),
                 (staged_tracked_csv, outputs.tracked_csv),
+                (staged_time_txt, outputs.time_txt),
             ):
                 os.replace(staged, destination)
     except cv2.error as exc:
@@ -593,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"ROI image: {outputs.roi_image}")
     print(f"ROI coordinates: {outputs.roi_csv}")
     print(f"Tracking results: {outputs.tracked_csv}")
+    print(f"Tracking time: {outputs.time_txt}")
     if roi_csv_path is None:
         QMessageBox.information(
             None,

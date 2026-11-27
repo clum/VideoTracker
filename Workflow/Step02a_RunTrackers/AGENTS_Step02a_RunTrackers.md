@@ -35,15 +35,17 @@ Implement a tool that tracks one user-selected object in a video with an OpenCV 
   - `<ScenarioName>_<algorithm>_roi.png`: unannotated crop of the selected ROI from the first frame.
   - `<ScenarioName>_<algorithm>_roi.csv`: one row with exactly these columns, in order: `x,y,width,height,center_x,center_y`.
   - `<ScenarioName>_<algorithm>_tracked.csv`: one row for every decoded video frame, with exactly these columns, in order: `frame_index,timestamp_seconds,tracking_status,x,y,width,height,center_x,center_y`.
+- Write `<ScenarioName>_<algorithm>_time.txt` in the same output directory. Include the elapsed time in seconds with readable precision. Measure from tracker setup (including initialization) through processing and writing the per-frame tracking CSV. Exclude interactive ROI selection and final output replacement; state the measured interval in the text file.
 - Use `tracked` and `lost` for `tracking_status`. For `lost` rows, write blank values for all coordinate and size columns. For the initial and subsequent successful rows, write the tracker's box and its center.
 - Do not create a movie file. Do not modify the source video or settings JSON. Existing files with these output names may be replaced; report all output paths on success.
-- Load and validate an ROI CSV before staging outputs. Permit it to be the same path as the generated `<ScenarioName>_<algorithm>_roi.csv` (the supplied ROI has already been loaded before the output is replaced). Reject collisions with the ROI image or tracked CSV outputs.
+- Load and validate an ROI CSV before staging outputs. Permit it to be the same path as the generated `<ScenarioName>_<algorithm>_roi.csv` (the supplied ROI has already been loaded before the output is replaced). Reject collisions with any other output, including the ROI image, tracked CSV, and time text file.
 
 ## Reliability and completion criteria
 
 - Release the video capture and close OpenCV windows on normal completion and handled errors.
 - Report understandable errors for missing or unreadable inputs, invalid settings, bad video metadata, canceled or invalid ROI selection, unavailable tracker APIs, and output-write failures. Do not leave partial CSV data presented as a successful result.
 - The user can run Step02a with a video, settings JSON, and any supported explicit algorithm choice. The tool writes the ROI PNG, ROI CSV, and full per-frame tracking CSV in the settings-derived output folder, without producing a movie.
+- The tool also writes the elapsed tracking time to `<ScenarioName>_<algorithm>_time.txt` in that output folder.
 - While processing frames, the terminal shows progress through the video as a percentage and completed/total frame count.
 - A valid `--roi-csv` bypasses manual ROI selection; a missing option preserves the interactive selection flow. If all paths are supplied, the ROI-CSV workflow completes without further prompts.
 - All tracker choices use the same output schemas and coordinate conventions. Every frame has exactly one tracking CSV row; lost frames have blank coordinates and do not stop later frame processing.
@@ -55,5 +57,6 @@ Implement a tool that tracks one user-selected object in a video with an OpenCV 
 - For each available classic tracker, confirm the initial ROI is saved, frame 0 is represented in the tracking CSV, and output names use the correct lowercase algorithm suffix.
 - For DaSiamRPN, Nano, and ViT, check required model arguments, successful model loading with valid files, and clear failure for missing or unreadable model files.
 - Confirm CSV headers and ordering, one tracking row per source frame, timestamps, top-left-origin ROI values, and blank coordinates on lost frames.
+- Confirm the time text file uses the scenario/algorithm naming convention, reports elapsed seconds, and documents the measured interval.
 - Confirm tracking continues after a failed update and no annotated movie is created.
 - Exercise canceled/zero-area ROI selection, unreadable video, invalid FPS/frame count, malformed settings, unavailable tracker factory, and output-write failures; each should fail clearly and clean up resources.

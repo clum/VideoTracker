@@ -61,8 +61,10 @@ The tool writes to `<ResultsDirectory>\Step02a_RunTrackers`:
 - `<ScenarioName>_<algorithm>_roi.png`: unannotated crop of the selected region in the first frame.
 - `<ScenarioName>_<algorithm>_roi.csv`: one row with `x,y,width,height,center_x,center_y`.
 - `<ScenarioName>_<algorithm>_tracked.csv`: one row per video frame with `frame_index,timestamp_seconds,tracking_status,x,y,width,height,center_x,center_y`.
+- `<ScenarioName>_<algorithm>_time.txt`: elapsed tracking time in seconds.
 
 While frames are processed, the terminal displays a progress bar with the completed and total frame counts and percentage.
+The time measurement covers tracker setup and initialization through processing and writing the per-frame tracking results. Interactive ROI selection and final replacement of output files are excluded; the time file states this interval.
 
 Coordinates are in source-video pixels from the top-left origin, with x increasing to the right and y increasing downward. Frame indices start at zero and timestamps are computed as `frame_index / fps`. The first frame is recorded as `tracked` with the selected ROI. If a tracker update fails, its row is marked `lost` with blank coordinate fields; processing continues for later frames.
 
